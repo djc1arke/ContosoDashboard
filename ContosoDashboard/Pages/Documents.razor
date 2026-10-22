@@ -1,0 +1,179 @@
+@page "/documents"
+@using ContosoDashboard.Services
+@using ContosoDashboard.Models
+@using System.Security.Claims
+@attribute [Authorize(Policy = "Employee")]
+@inject IDocumentService DocumentService
+@inject IProjectService ProjectService
+@inject AuthenticationStateProvider AuthenticationStateProvider
+
+<PageTitle>My Documents - ContosoDashboard</PageTitle>
+
+<div class="container-fluid">
+    <div class="row mb-4">
+        <div class="col">
+            <h1>My Documents</h1>
+        </div>
+        <div class="col-auto">
+            <button class="btn btn-primary" @onclick="() => showUpload = !showUpload">
+                <i class="bi bi-upload"></i> Upload
+            </button>
+        </div>
+    </div>
+
+    @if (showUpload)
+    {
+        <DocumentUploadForm OnUploaded="OnUploadedAsync" />
+    }
+
+    <!-- Search and filters -->
+    <div class="row g-2 mb-3">
+        <div class="col-md-4">
+            <label class="form-label" for="doc-search">Search</label>
+            <div class="input-group">
+                <input id="doc-search" class="form-control" placeholder="Title, description, tag, uploader, project"
+                       @bind="searchTerm" @bind:event="oninput" @onkeydown="OnSearchKey" />
+                <button class="btn btn-outline-secondary" @onclick="ApplyAsync">Search</button>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label" for="f-cat">Category</label>
+            <select id="f-cat" class="form-select" @bind="categoryFilter">
+                <option value="">All</option>
+                @foreach (var c in Enum.GetValues<DocumentCategory>())
+                {
+                    <option value="@c">@c</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label" for="f-proj">Project</label>
+            <select id="f-proj" class="form-select" @bind="projectFilter">
+                <option value="">All</option>
+                @foreach (var p in projects)
+                {
+                    <option value="@p.ProjectId">@p.Name</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label" for="f-from">From</label>
+            <input id="f-from" type="date" class="form-control" @bind="dateFrom" />
+        </div>
+        <div class="col-md-2">
+            <label class="form-label" for="f-to">To</label>
+            <input id="f-to" type="date" class="form-control" @bind="dateTo" />
+        </div>
+        <div class="col-12">
+            <button class="btn btn-primary btn-sm" @onclick="ApplyAsync">Apply filters</button>
+            <button class="btn btn-outline-secondary btn-sm" @onclick="ResetAsync">Reset</button>
+        </div>
+    </div>
+
+    @if (loading)
+    {
+        <p>Loading...</p>
+    }
+    else
+    {
+        <DocumentList Query="query" Result="result" OnSort="SortAsync" OnPage="PageAsync" ShowOwnerActions="true">
+            <EmptyContent>
+                <div class="alert alert-info">
+                    @if (hasActiveFilter)
+                    {
+                        <span>No documents match your search or filters.</span>
+                    }
+                    else
+                    {
+                        <span>You have not uploaded any documents yet. Click <strong>Upload</strong>, choose your files, and
+                        submit them to add your first document.</span>
+                    }
+                </div>
+            </EmptyContent>
+        </DocumentList>
+    }
+</div>
+
+@code {
+    private readonly DocumentQuery query = new();
+    private PagedResult<DocumentListItem>? result;
+    private List<Project> projects = new();
+    private bool showUpload = true;
+    private bool loading = true;
+    private bool hasActiveFilter;
+    private int currentUserId;
+    private string searchTerm = string.Empty;
+    private string categoryFilter = string.Empty;
+    private string projectFilter = string.Empty;
+    private DateTime? dateFrom;
+    private DateTime? dateTo;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var state = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var claim = state.User.FindFirst(ClaimTypes.NameIdentifier);
+        if (claim != null && int.TryParse(claim.Value, out var id))
+        {
+            currentUserId = id;
+            projects = await ProjectService.GetUserProjectsAsync(id);
+            await LoadAsync();
+        }
+        loading = false;
+    }
+
+    private async Task LoadAsync()
+    {
+        query.Category = Enum.TryParse<DocumentCategory>(categoryFilter, out var c) ? c : null;
+        query.ProjectId = int.TryParse(projectFilter, out var p) ? p : null;
+        query.DateFrom = dateFrom;
+        query.DateTo = dateTo;
+
+        var term = searchTerm.Trim();
+        hasActiveFilter = term.Length > 0 || query.Category != null || query.ProjectId != null
+                          || query.DateFrom != null || query.DateTo != null;
+
+        // Plain list shows only the user's own uploads; a keyword search spans every document the user may access.
+        result = term.Length > 0
+            ? await DocumentService.SearchAsync(term, query, currentUserId)
+            : await DocumentService.GetMyDocumentsAsync(query, currentUserId);
+    }
+
+    private async Task ApplyAsync()
+    {
+        query.Page = 1;
+        await LoadAsync();
+    }
+
+    private async Task ResetAsync()
+    {
+        searchTerm = categoryFilter = projectFilter = string.Empty;
+        dateFrom = dateTo = null;
+        query.Page = 1;
+        await LoadAsync();
+    }
+
+    private async Task OnSearchKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await ApplyAsync();
+    }
+
+    private async Task SortAsync(DocumentSortBy by)
+    {
+        if (query.SortBy == by) query.Descending = !query.Descending;
+        else { query.SortBy = by; query.Descending = by == DocumentSortBy.UploadDate; }
+        query.Page = 1;
+        await LoadAsync();
+    }
+
+    private async Task PageAsync(int page)
+    {
+        query.Page = page;
+        await LoadAsync();
+    }
+
+    private async Task OnUploadedAsync()
+    {
+        query.Page = 1;
+        await LoadAsync();
+    }
+}

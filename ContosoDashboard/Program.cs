@@ -44,6 +44,12 @@ builder.Services.AddScoped<IProjectService, ProjectService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IDashboardService, DashboardService>();
 
+// Document management infrastructure
+builder.Services.AddSingleton<IFileStorageService, LocalFileStorageService>();
+builder.Services.AddSingleton<IMalwareScanService, StubMalwareScanService>();
+builder.Services.AddScoped<IDocumentActivityService, DocumentActivityService>();
+builder.Services.AddScoped<IDocumentService, DocumentService>();
+
 // Add HttpContextAccessor for accessing user claims
 builder.Services.AddHttpContextAccessor();
 
@@ -106,6 +112,44 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapBlazorHub();
+
+// Document delivery endpoints (contracts/http-endpoints.md)
+app.MapGet("/documents/{id:int}/download",
+        (int id, HttpContext http, IDocumentService documents, CancellationToken ct)
+            => DocumentDelivery.ServeAsync(id, http, documents, DocumentAccessKind.Download, ct))
+    .RequireAuthorization("Employee");
+app.MapGet("/documents/{id:int}/preview",
+        (int id, HttpContext http, IDocumentService documents, CancellationToken ct)
+            => DocumentDelivery.ServeAsync(id, http, documents, DocumentAccessKind.Preview, ct))
+    .RequireAuthorization("Employee");
+
 app.MapFallbackToPage("/_Host");
 
 app.Run();
+
+// Exposed for WebApplicationFactory-based tests.
+public partial class Program { }
+
+static class DocumentDelivery
+{
+    public static async Task<IResult> ServeAsync(int id, HttpContext http, IDocumentService documents,
+        DocumentAccessKind kind, CancellationToken ct)
+    {
+        var claim = http.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (!int.TryParse(claim, out var userId)) return Results.NotFound();
+
+        var doc = await documents.OpenReadAsync(id, userId, kind, ct);
+        if (doc == null) return Results.NotFound();
+
+        var name = doc.FileName;
+        var ascii = new string(name.Select(c => c < 0x20 || c > 0x7E || c == '"' || c == '\\' ? '_' : c).ToArray());
+        var disposition = kind == DocumentAccessKind.Preview ? "inline" : "attachment";
+        var headers = http.Response.Headers;
+        headers["Content-Disposition"] = $"{disposition}; filename=\"{ascii}\"; filename*=UTF-8''{Uri.EscapeDataString(name)}";
+        headers["X-Content-Type-Options"] = "nosniff";
+        headers["Cache-Control"] = "private, no-store";
+        headers["Content-Length"] = doc.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        return Results.Stream(doc.Stream, doc.ContentType);
+    }
+}

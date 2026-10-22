@@ -349,3 +349,7 @@ MigrationBackup/
 
 # Ionide (cross platform F# VS Code tools) working folder
 .ionide/
+
+# Uploaded document storage
+AppData/uploads/
+ContosoDashboard/AppData/uploads/
