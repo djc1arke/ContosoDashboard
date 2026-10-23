@@ -1,0 +1,309 @@
+@using ContosoDashboard.Services
+@using ContosoDashboard.Models
+@using System.Security.Claims
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Components.Forms
+@inject IDocumentService DocumentService
+@inject IProjectService ProjectService
+@inject AuthenticationStateProvider AuthenticationStateProvider
+
+<div class="card mb-4">
+    <div class="card-header"><strong>Upload documents</strong></div>
+    <div class="card-body">
+        <p class="text-muted small mb-3">
+            Accepted types: @DocumentFileRules.AcceptedTypesText. Maximum @DocumentFileRules.SizeLimitText per file.
+            Uploaded documents appear in <em>My Documents</em> and are visible only to you, and to the people you
+            share them with or who belong to the associated project. Deleting a document is permanent.
+        </p>
+
+        <div class="mb-3">
+            <label class="form-label" for="doc-files">Files</label>
+            <InputFile id="doc-files" class="form-control" multiple OnChange="OnFilesSelected"
+                       accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.jpg,.jpeg,.png" disabled="@isUploading" />
+        </div>
+
+        @if (entries.Count > 0)
+        {
+            <div class="row g-3 mb-3">
+                <div class="col-md-4">
+                    <label class="form-label" for="doc-category">Category <span class="text-danger">*</span></label>
+                    <select id="doc-category" class="form-select" @bind="categoryValue" disabled="@isUploading">
+                        <option value="">Select a category...</option>
+                        @foreach (var c in Enum.GetValues<DocumentCategory>())
+                        {
+                            <option value="@c">@CategoryLabel(c)</option>
+                        }
+                    </select>
+                    @if (!string.IsNullOrEmpty(categoryError))
+                    {
+                        <div class="text-danger small">@categoryError</div>
+                    }
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" for="doc-project">Project (optional)</label>
+                    <select id="doc-project" class="form-select" @bind="projectValue" disabled="@isUploading">
+                        <option value="">No project</option>
+                        @foreach (var p in projects)
+                        {
+                            <option value="@p.ProjectId">@p.Name</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" for="doc-tags">Tags (optional, comma separated)</label>
+                    <input id="doc-tags" class="form-control" @bind="tagsText" maxlength="400" disabled="@isUploading" />
+                </div>
+                <div class="col-12">
+                    <label class="form-label" for="doc-desc">Description (optional)</label>
+                    <textarea id="doc-desc" class="form-control" rows="2" maxlength="2000" @bind="description" disabled="@isUploading"></textarea>
+                </div>
+            </div>
+
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr><th>File</th><th style="width:35%">Title <span class="text-danger">*</span></th><th style="width:30%">Status</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var e in entries)
+                    {
+                        <tr>
+                            <td>@e.File.Name <span class="text-muted small">(@FormatSize(e.File.Size))</span></td>
+                            <td>
+                                <input class="form-control form-control-sm" @bind="e.Title" maxlength="255"
+                                       disabled="@(isUploading || e.Succeeded)" aria-label="Title for @e.File.Name" />
+                                @if (!string.IsNullOrEmpty(e.TitleError))
+                                {
+                                    <div class="text-danger small">@e.TitleError</div>
+                                }
+                            </td>
+                            <td>
+                                @if (e.Succeeded)
+                                {
+                                    <span class="text-success"><i class="bi bi-check-circle"></i> Uploaded</span>
+                                }
+                                else if (!string.IsNullOrEmpty(e.Error))
+                                {
+                                    <span class="text-danger"><i class="bi bi-x-circle"></i> @e.Error</span>
+                                }
+                                else if (e.InProgress)
+                                {
+                                    <div class="progress" role="progressbar" aria-valuenow="@e.Progress" aria-valuemin="0" aria-valuemax="100">
+                                        <div class="progress-bar" style="width:@(e.Progress)%">@(e.Progress)%</div>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">Ready</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+
+            <button class="btn btn-primary" @onclick="SubmitAsync" disabled="@(isUploading || !entries.Any(x => !x.Succeeded))">
+                @if (isUploading)
+                {
+                    <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                    <span> Uploading...</span>
+                }
+                else
+                {
+                    <span>Submit</span>
+                }
+            </button>
+            <button class="btn btn-outline-secondary ms-2" @onclick="Clear" disabled="@isUploading">Clear</button>
+        }
+
+        @if (!string.IsNullOrEmpty(summary))
+        {
+            <div class="alert @(summaryIsError ? "alert-warning" : "alert-success") mt-3" role="status">@summary</div>
+        }
+    </div>
+</div>
+
+@code {
+    private const int MaxFilesPerBatch = 20;
+
+    [Parameter] public int? ProjectId { get; set; }
+    [Parameter] public int? TaskId { get; set; }
+    [Parameter] public EventCallback OnUploaded { get; set; }
+
+    private sealed class FileEntry
+    {
+        public IBrowserFile File { get; init; } = null!;
+        public string Title { get; set; } = string.Empty;
+        public string? TitleError { get; set; }
+        public string? Error { get; set; }
+        public bool Succeeded { get; set; }
+        public bool InProgress { get; set; }
+        public int Progress { get; set; }
+    }
+
+    private readonly List<FileEntry> entries = new();
+    private List<Project> projects = new();
+    private string categoryValue = string.Empty;
+    private string projectValue = string.Empty;
+    private string tagsText = string.Empty;
+    private string? description;
+    private string? categoryError;
+    private string? summary;
+    private bool summaryIsError;
+    private bool isUploading;
+    private int currentUserId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var state = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var claim = state.User.FindFirst(ClaimTypes.NameIdentifier);
+        if (claim != null && int.TryParse(claim.Value, out var id))
+        {
+            currentUserId = id;
+            projects = await ProjectService.GetUserProjectsAsync(id);
+        }
+        if (ProjectId != null) projectValue = ProjectId.Value.ToString();
+    }
+
+    private void OnFilesSelected(InputFileChangeEventArgs args)
+    {
+        summary = null;
+        entries.Clear();
+        foreach (var file in args.GetMultipleFiles(MaxFilesPerBatch))
+        {
+            entries.Add(new FileEntry { File = file, Title = Path.GetFileNameWithoutExtension(file.Name) });
+        }
+        if (args.FileCount > MaxFilesPerBatch)
+        {
+            summary = $"Only the first {MaxFilesPerBatch} files were selected.";
+            summaryIsError = true;
+        }
+    }
+
+    private async Task SubmitAsync()
+    {
+        summary = null;
+        categoryError = null;
+        var pending = entries.Where(e => !e.Succeeded).ToList();
+        var valid = true;
+        foreach (var e in pending)
+        {
+            e.TitleError = string.IsNullOrWhiteSpace(e.Title) ? "A title is required." : null;
+            if (e.TitleError != null) valid = false;
+        }
+        if (!Enum.TryParse<DocumentCategory>(categoryValue, out var category))
+        {
+            categoryError = "A category is required.";
+            valid = false;
+        }
+        if (!valid) return;
+
+        int? projId = int.TryParse(projectValue, out var pid) ? pid : null;
+        var tags = tagsText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+        isUploading = true;
+        var ok = 0;
+        var failed = 0;
+        foreach (var e in pending)
+        {
+            e.Error = null;
+            e.InProgress = true;
+            e.Progress = 0;
+            StateHasChanged();
+            try
+            {
+                using var buffer = new MemoryStream();
+                try
+                {
+                    await using var input = e.File.OpenReadStream(DocumentFileRules.MaxFileSizeBytes + 1);
+                    var chunk = new byte[80 * 1024];
+                    long copied = 0;
+                    int n;
+                    while ((n = await input.ReadAsync(chunk)) > 0)
+                    {
+                        await buffer.WriteAsync(chunk.AsMemory(0, n));
+                        copied += n;
+                        e.Progress = e.File.Size > 0 ? (int)(copied * 50 / e.File.Size) : 0;
+                        StateHasChanged();
+                    }
+                }
+                catch (IOException)
+                {
+                    e.Error = $"The file is larger than the {DocumentFileRules.SizeLimitText} limit.";
+                    failed++;
+                    continue;
+                }
+
+                buffer.Position = 0;
+                var progress = new Progress<int>(p =>
+                {
+                    e.Progress = 50 + p / 2;
+                    InvokeAsync(StateHasChanged);
+                });
+                var result = await DocumentService.UploadAsync(new UploadRequest
+                {
+                    File = new FileUpload { Content = buffer, FileName = e.File.Name, Length = buffer.Length, Progress = progress },
+                    Metadata = new DocumentMetadata
+                    {
+                        Title = e.Title,
+                        Description = description,
+                        Category = category,
+                        ProjectId = projId,
+                        Tags = tags
+                    }
+                }, currentUserId);
+
+                if (result.Succeeded) { e.Succeeded = true; ok++; }
+                else { e.Error = result.ErrorMessage ?? "Upload failed."; failed++; }
+            }
+            catch (Exception)
+            {
+                e.Error = "The upload failed unexpectedly. Please try again.";
+                failed++;
+            }
+            finally
+            {
+                e.InProgress = false;
+            }
+        }
+        isUploading = false;
+
+        summaryIsError = failed > 0;
+        summary = failed == 0
+            ? $"{ok} document(s) uploaded successfully."
+            : $"{ok} uploaded, {failed} failed. Fix the problems shown and submit again.";
+
+        if (ok > 0)
+        {
+            await OnUploaded.InvokeAsync();
+            if (failed == 0) ResetForm(keepSummary: true);
+        }
+    }
+
+    private void Clear() => ResetForm(keepSummary: false);
+
+    private void ResetForm(bool keepSummary)
+    {
+        entries.Clear();
+        categoryValue = string.Empty;
+        tagsText = string.Empty;
+        description = null;
+        categoryError = null;
+        if (ProjectId == null) projectValue = string.Empty;
+        if (!keepSummary) summary = null;
+    }
+
+    private static string CategoryLabel(DocumentCategory c) => c switch
+    {
+        DocumentCategory.ProjectDocuments => "Project Documents",
+        DocumentCategory.TeamResources => "Team Resources",
+        DocumentCategory.PersonalFiles => "Personal Files",
+        _ => c.ToString()
+    };
+
+    private static string FormatSize(long bytes) => bytes switch
+    {
+        >= 1_048_576 => $"{bytes / 1_048_576.0:0.#} MB",
+        >= 1024 => $"{bytes / 1024.0:0.#} KB",
+        _ => $"{bytes} B"
+    };
+}
